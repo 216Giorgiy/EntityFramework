@@ -118,7 +118,7 @@ namespace Microsoft.EntityFrameworkCore.Query
                 Expression.Parameter(typeof(Order), "o"));
 
             Assert.Equal(
-                CoreStrings.InvalidComplexPropertyExpression(lambdaExpression.ToString()),
+                CoreStrings.InvalidIncludeLambdaExpression("Include", lambdaExpression.ToString()),
                 Assert.Throws<InvalidOperationException>(
                     () =>
                         {
@@ -193,7 +193,7 @@ namespace Microsoft.EntityFrameworkCore.Query
                 Expression.Parameter(typeof(Order), "o"));
 
             Assert.Equal(
-                CoreStrings.InvalidComplexPropertyExpression(lambdaExpression.ToString()),
+                CoreStrings.InvalidIncludeLambdaExpression("ThenInclude", lambdaExpression.ToString()),
                 Assert.Throws<ArgumentException>(
                     () =>
                         {

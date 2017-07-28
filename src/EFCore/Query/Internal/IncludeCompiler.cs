@@ -12,10 +12,12 @@ using JetBrains.Annotations;
 using Microsoft.EntityFrameworkCore.Extensions.Internal;
 using Microsoft.EntityFrameworkCore.Internal;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Metadata.Internal;
 using Microsoft.EntityFrameworkCore.Query.ExpressionVisitors.Internal;
 using Microsoft.EntityFrameworkCore.Query.ResultOperators.Internal;
 using Remotion.Linq;
 using Remotion.Linq.Clauses;
+using Remotion.Linq.Clauses.Expressions;
 using Remotion.Linq.Clauses.StreamedData;
 
 namespace Microsoft.EntityFrameworkCore.Query.Internal
@@ -120,16 +122,13 @@ namespace Microsoft.EntityFrameworkCore.Query.Internal
 
             foreach (var includeResultOperator in _includeResultOperators.ToArray())
             {
-                var navigationPath = includeResultOperator.GetNavigationPath(_queryCompilationContext);
-
                 var querySourceReferenceExpression
                     = querySourceTracingExpressionVisitor
                         .FindResultQuerySourceReferenceExpression(
                             queryModel.GetOutputExpression(),
                             includeResultOperator.QuerySource);
 
-                if (querySourceReferenceExpression == null
-                    || navigationPath == null)
+                if (querySourceReferenceExpression == null)
                 {
                     continue;
                 }
@@ -145,14 +144,120 @@ namespace Microsoft.EntityFrameworkCore.Query.Internal
                     includeLoadTrees.Add(includeLoadTree = new IncludeLoadTree(querySourceReferenceExpression));
                 }
 
-                includeLoadTree.AddLoadPath(navigationPath);
+                PopulateIncludeLoadTree(includeResultOperator, includeLoadTree);
 
                 _queryCompilationContext.Logger.NavigationIncluded(includeResultOperator);
-
                 _includeResultOperators.Remove(includeResultOperator);
             }
 
             return includeLoadTrees;
+        }
+
+        private void PopulateIncludeLoadTree(IncludeResultOperator includeResultOperator, IncludeLoadTree includeLoadTree)
+        {
+            if (includeResultOperator.NavigationPaths != null)
+            {
+                foreach (var navigationPath in includeResultOperator.NavigationPaths)
+                {
+                    includeLoadTree.AddLoadPath(navigationPath);
+                }
+
+                return;
+            }
+
+            IEntityType entityType = null;
+            if (includeResultOperator.PathFromQuerySource is QuerySourceReferenceExpression qsre)
+            {
+                entityType = _queryCompilationContext.FindEntityType(qsre.ReferencedQuerySource);
+            }
+
+            if (entityType == null)
+            {
+                entityType = _queryCompilationContext.Model.FindEntityType(includeResultOperator.PathFromQuerySource.Type);
+
+                if (entityType == null)
+                {
+                    var pathFromSource = MemberAccessBindingExpressionVisitor.GetPropertyPath(
+                        includeResultOperator.PathFromQuerySource, _queryCompilationContext, out qsre);
+
+                    if (pathFromSource.Count > 0
+                        && pathFromSource[pathFromSource.Count - 1] is INavigation navigation)
+                    {
+                        entityType = navigation.GetTargetType();
+                    }
+                }
+            }
+
+            if (entityType == null)
+            {
+                throw new NotSupportedException(
+                    CoreStrings.IncludeNotSpecifiedDirectlyOnEntityType(
+                        includeResultOperator.ToString(),
+                        includeResultOperator.NavigationPropertyPaths.FirstOrDefault()));
+            }
+
+            var navigations = FindNavigations(entityType, includeResultOperator.NavigationPropertyPaths.First());
+            if (!navigations.Any())
+            {
+                throw new InvalidOperationException(
+                    CoreStrings.IncludeBadNavigation(includeResultOperator.NavigationPropertyPaths.First(), entityType.DisplayName()));
+            }
+
+            var navigationPaths = navigations.Select(navigation => new List<INavigation> { navigation }).ToList();
+
+            for (var i = 1; i < includeResultOperator.NavigationPropertyPaths.Count; i++)
+            {
+                var newNavigationPaths = new List<List<INavigation>>();
+                var matchingNavigations = false;
+                foreach (var navigationPath in navigationPaths)
+                {
+                    entityType = navigationPath.Last().GetTargetType();
+                    navigations = FindNavigations(entityType, includeResultOperator.NavigationPropertyPaths[i]);
+
+                    if (navigations.Any())
+                    {
+                        matchingNavigations = true;
+                        newNavigationPaths.AddRange(navigations.Select(navigation => new List<INavigation>(navigationPath) { navigation }));
+                    }
+                    else
+                    {
+                        includeLoadTree.AddLoadPath(navigationPath);
+                    }
+                }
+
+                if (!matchingNavigations)
+                {
+                    throw new InvalidOperationException(
+                        CoreStrings.IncludeBadNavigation(includeResultOperator.NavigationPropertyPaths[i], entityType.DisplayName()));
+                }
+
+                navigationPaths = newNavigationPaths;
+            }
+
+            foreach (var navigationPath in navigationPaths)
+            {
+                includeLoadTree.AddLoadPath(navigationPath);
+            }
+        }
+
+        private static List<INavigation> FindNavigations(IEntityType entityType, string name)
+        {
+            var navigationPath = entityType.FindNavigation(name);
+            if (navigationPath != null)
+            {
+                return new List<INavigation> { navigationPath };
+            }
+
+            var navigations = new List<INavigation>();
+            foreach (var derived in entityType.GetDirectlyDerivedTypes())
+            {
+                foreach (var navigationPathOnDerived in FindNavigations(derived, name))
+                {
+                    navigations.Add(navigationPathOnDerived);
+                }
+            }
+
+            return navigations;
         }
 
         private static void ApplyParentOrderings(
